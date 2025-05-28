@@ -23,10 +23,9 @@ const (
 	defaultNostrSecretFile = "secret"
 	eventKindFile         = 4444
 	defaultRelayTimeout   = 10 * time.Second
-	orbiVersion           = "orbi/v0.2.3-go"
 	localOrbiDirName      = ".orbi"
 	rootEventIDFileName   = "root_event_id"
-	lastEventIDFileName   = "last_event_id"
+	headFileName          = "HEAD"
 )
 
 var (
@@ -143,7 +142,7 @@ func publishFileNostr(
 	pk string,
 	relays []string,
 	rootEventIDHex string,
-	replyToEventIDHex string,
+	directParentEventIDHex string,
 	commitMessage string,
 ) (string, []string, error) {
 	content, err := ioutil.ReadFile(filePath)
@@ -159,17 +158,14 @@ func publishFileNostr(
 		Kind:      eventKindFile,
 		Tags:      nostr.Tags{
 			{"f", fileName},
-			{"app", orbiVersion},
 		},
 		Content: string(content),
 	}
 
 	if rootEventIDHex != "" {
 		ev.Tags = append(ev.Tags, nostr.Tag{"e", rootEventIDHex, "", "root"})
-		if replyToEventIDHex != "" {
-			ev.Tags = append(ev.Tags, nostr.Tag{"e", replyToEventIDHex, "", "reply"})
-		} else {
-			log.Println("Warning: root_event_id present but reply_to_event_id is missing. This implies a commit that isn't replying to a specific previous version directly (unusual for linear history).")
+		if directParentEventIDHex != "" {
+			ev.Tags = append(ev.Tags, nostr.Tag{"e", directParentEventIDHex, "", "reply"})
 		}
 	}
 
@@ -181,13 +177,14 @@ func publishFileNostr(
 		return "", nil, fmt.Errorf("failed to sign event: %w", err)
 	}
 	log.Printf("Built event: kind=%d, filename='%s', content_length=%d, ID: %s", ev.Kind, fileName, len(ev.Content), ev.ID)
+	log.Printf("  Tags for event %s: %v", ev.ID, ev.Tags)
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	successfulRelays := []string{}
 	successCount := 0
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(len(relays))*defaultRelayTimeout + 5*time.Second) // Overall timeout
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(len(relays))*defaultRelayTimeout + 5*time.Second)
 	defer cancel()
 
 	fmt.Printf("Attempting to publish event %s to %d relays...\n", ev.ID, len(relays))
@@ -308,6 +305,12 @@ func main() {
 		}
 		if existingRootID != "" {
 			log.Printf("File %s has already been published. Root event ID: %s", absoluteFilePath, existingRootID)
+			headID, _ := readEventIDFromFile(absoluteFilePath, headFileName)
+			if headID != "" {
+				log.Printf("  Current explicit HEAD is at: %s", headID)
+			} else {
+				log.Printf("  HEAD is implicitly the latest chronological commit.")
+			}
 			log.Println("Use 'orbi commit <filepath>' to publish a new version.")
 			return
 		}
@@ -321,11 +324,8 @@ func main() {
 		if err := writeEventIDToFile(absoluteFilePath, rootEventIDFileName, eventID); err != nil {
 			log.Fatalf("Failed to save root event ID for %s: %v", absoluteFilePath, err)
 		}
-		if err := writeEventIDToFile(absoluteFilePath, lastEventIDFileName, eventID); err != nil {
-			log.Fatalf("Failed to save last event ID for %s: %v", absoluteFilePath, err)
-		}
 		orbiSubDir, _ := getLocalOrbiFileSpecificDirPath(absoluteFilePath)
-		fmt.Printf("Successfully published %s. Root Event ID: %s. Stored in %s/\n", absoluteFilePath, eventID, orbiSubDir)
+		fmt.Printf("Successfully published %s. Root Event ID: %s. Implicit HEAD is latest chronological. Stored in %s/\n", absoluteFilePath, eventID, orbiSubDir)
 
 	case "commit":
 		rootEventID, err := readEventIDFromFile(absoluteFilePath, rootEventIDFileName)
@@ -336,12 +336,18 @@ func main() {
 			log.Fatalf("Error: File %s has not yet been published. Use 'orbi publish <filepath>' first.", absoluteFilePath)
 		}
 
-		parentEventID, err := readEventIDFromFile(absoluteFilePath, lastEventIDFileName)
-		if err != nil {
-			log.Fatalf("Error reading last event ID for %s: %v", absoluteFilePath, err)
+		parentEventIDToReply := rootEventID
+
+		explicitHeadID, err := readEventIDFromFile(absoluteFilePath, headFileName)
+		if err != nil && !os.IsNotExist(err) {
+			log.Printf("Notice: Error reading explicit HEAD file for %s: %v", absoluteFilePath, err)
 		}
-		if parentEventID == "" {
-			log.Fatalf("Error: Last event ID for %s is missing, though root exists. State is inconsistent for this file.", absoluteFilePath)
+
+		if explicitHeadID != "" {
+			fmt.Printf("  Current explicit HEAD is set to: %s\n", explicitHeadID)
+			fmt.Printf("  (This commit will still reply to root: %s as per default behavior)\n", rootEventID)
+		} else {
+			fmt.Printf("  No explicit HEAD set. Implicit HEAD is the latest chronological commit.\n")
 		}
 
 		fmt.Printf("Committing new version of %s to relays: %s\n", absoluteFilePath, strings.Join(parsedRelays, ", "))
@@ -349,18 +355,16 @@ func main() {
 			fmt.Printf("  Commit message: %s\n", currentCommitMessage)
 		}
 		fmt.Printf("  Root event ID for this file: %s\n", rootEventID)
-		fmt.Printf("  Replying to event ID (previous version for this file): %s\n", parentEventID)
+		fmt.Printf("  Replying directly to Root Event ID: %s\n", parentEventIDToReply)
 
-		newEventID, _, err := publishFileNostr(absoluteFilePath, sk, pk, parsedRelays, rootEventID, parentEventID, currentCommitMessage)
+		newEventID, _, err := publishFileNostr(absoluteFilePath, sk, pk, parsedRelays, rootEventID, parentEventIDToReply, currentCommitMessage)
 		if err != nil {
 			log.Fatalf("Failed to commit new version of %s: %v", absoluteFilePath, err)
 		}
 
-		if err := writeEventIDToFile(absoluteFilePath, lastEventIDFileName, newEventID); err != nil {
-			log.Fatalf("Failed to update last event ID for %s: %v", absoluteFilePath, err)
-		}
 		orbiSubDir, _ := getLocalOrbiFileSpecificDirPath(absoluteFilePath)
-		fmt.Printf("Successfully committed %s. New Event ID: %s. Updated in %s/\n", absoluteFilePath, newEventID, orbiSubDir)
+		fmt.Printf("Successfully committed %s. New Event ID: %s. Stored in %s/\n", absoluteFilePath, newEventID, orbiSubDir)
+		fmt.Printf("  (HEAD file was not modified by this commit operation.)\n")
 
 	default:
 		log.Fatalf("Internal error: Unhandled command %s", command)
