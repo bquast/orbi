@@ -20,6 +20,7 @@ const (
 	defaultNostrSecretDir = "~/.nostr"
 	defaultNostrSecretFile = "secret"
 	eventKindFile         = 4444
+	eventKindConfluence   = 4445
 	defaultRelayTimeout   = 10 * time.Second
 	localOrbiDirName      = ".orbi"
 	rootEventIDFileName   = "root_event_id"
@@ -112,40 +113,125 @@ func publishFile(filePath, sk, pk, message string) error {
 	return nil
 }
 
-func main() {
-	if len(os.Args) < 3 || os.Args[1] != "commit" {
-		fmt.Println("Usage: orbi commit <file> -m \"message\"")
-		return
+func publishConfluence(references []string, sk, pk, message string) error {
+	ev := nostr.Event{
+		PubKey:    pk,
+		CreatedAt: nostr.Now(),
+		Kind:      eventKindConfluence,
+		Content:   message,
+		Tags:      make(nostr.Tags, 0),
 	}
 
-	// parse manually
-	args := os.Args[2:]
-	var file string
-	var message string
-	for i := 0; i < len(args); i++ {
-		if args[i] == "-m" && i+1 < len(args) {
-			message = args[i+1]
-			i++
-		} else if file == "" {
-			file = args[i]
+	for _, ref := range references {
+		if len(ref) == 64 {
+			ev.Tags = append(ev.Tags, nostr.Tag{"e", ref})
+		} else {
+			ev.Tags = append(ev.Tags, nostr.Tag{"f", ref})
 		}
 	}
 
-	if file == "" {
-		fmt.Println("No file specified.")
+	if err := ev.Sign(sk); err != nil {
+		return err
+	}
+
+	fmt.Printf("Publishing confluence to relays...")
+	for _, r := range defaultRelays {
+		ctx, cancel := context.WithTimeout(context.Background(), defaultRelayTimeout)
+		defer cancel()
+		relay, err := nostr.RelayConnect(ctx, r)
+		if err != nil {
+			log.Printf("Failed to connect to %s: %v", r, err)
+			continue
+		}
+		relay.Publish(ctx, ev)
+		relay.Close()
+		log.Printf("Published to %s", r)
+	}
+	return nil
+}
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Println("Usage: orbi <command> [arguments]")
+		fmt.Println("Commands:")
+		fmt.Println("  commit <file> -m \"message\"")
+		fmt.Println("  confluence <ref1> <ref2> ... -m \"message\"")
 		return
 	}
 
-	fmt.Printf("Committing %s with message: %s", file, message)
-	file = expandPath(file)
+	switch os.Args[1] {
+	case "commit":
+		if len(os.Args) < 3 || os.Args[1] != "commit" {
+			fmt.Println("Usage: orbi commit <file> -m \"message\"")
+			return
+		}
 
-	sk, pk, err := loadNostrSecretKey()
-	if err != nil {
-		log.Fatal(err)
-	}
+		args := os.Args[2:]
+		var file string
+		var message string
+		for i := 0; i < len(args); i++ {
+			if args[i] == "-m" && i+1 < len(args) {
+				message = args[i+1]
+				i++
+			} else if file == "" {
+				file = args[i]
+			}
+		}
 
-	err = publishFile(file, sk, pk, message)
-	if err != nil {
-		log.Fatal(err)
+		if file == "" {
+			fmt.Println("No file specified.")
+			return
+		}
+
+		fmt.Printf("Committing %s with message: %s", file, message)
+		file = expandPath(file)
+
+		sk, pk, err := loadNostrSecretKey()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		err = publishFile(file, sk, pk, message)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+	case "confluence":
+		if len(os.Args) < 4 {
+			fmt.Println("Usage: orbi confluence <ref1> <ref2> ... -m \"message\"")
+			return
+		}
+
+		args := os.Args[2:]
+		var refs []string
+		var message string
+		for i := 0; i < len(args); i++ {
+			if args[i] == "-m" && i+1 < len(args) {
+				message = args[i+1]
+				i++
+			} else {
+				refs = append(refs, args[i])
+			}
+		}
+
+		if len(refs) == 0 {
+			fmt.Println("No references specified.")
+			return
+		}
+
+		fmt.Printf("Creating confluence with %d references and message: %s\n", len(refs), message)
+
+		sk, pk, err := loadNostrSecretKey()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		err = publishConfluence(refs, sk, pk, message)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+	default:
+		fmt.Println("Unknown command. Use 'commit' or 'confluence'")
 	}
 }
