@@ -25,6 +25,7 @@ const (
 	localOrbiDirName      = ".orbi"
 	rootEventIDFileName   = "root_event_id"
 	headFileName          = "HEAD"
+	trackedFilesFileName  = "tracked_files"
 )
 
 var defaultRelays = []string{
@@ -77,6 +78,66 @@ func loadNostrSecretKey() (string, string, error) {
 	return sk, pk, nil
 }
 
+func getTrackedFiles() ([]string, error) {
+	orbiDir := filepath.Join(".", localOrbiDirName)
+	trackedFilesPath := filepath.Join(orbiDir, trackedFilesFileName)
+	
+	if _, err := os.Stat(trackedFilesPath); os.IsNotExist(err) {
+		return []string{}, nil
+	}
+	
+	content, err := ioutil.ReadFile(trackedFilesPath)
+	if err != nil {
+		return nil, err
+	}
+	
+	files := strings.Split(strings.TrimSpace(string(content)), "\n")
+	// Filter out empty lines
+	var result []string
+	for _, f := range files {
+		if f != "" {
+			result = append(result, f)
+		}
+	}
+	return result, nil
+}
+
+func trackFile(filename string) error {
+	orbiDir := filepath.Join(".", localOrbiDirName)
+	if err := os.MkdirAll(orbiDir, 0755); err != nil {
+		return err
+	}
+	
+	trackedFilesPath := filepath.Join(orbiDir, trackedFilesFileName)
+	
+	// Get existing files
+	existing, err := getTrackedFiles()
+	if err != nil {
+		return err
+	}
+	
+	// Check if file is already tracked
+	baseFilename := filepath.Base(filename)
+	for _, f := range existing {
+		if f == baseFilename {
+			return nil // Already tracked
+		}
+	}
+	
+	// Append new file
+	f, err := os.OpenFile(trackedFilesPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	
+	if _, err := f.WriteString(baseFilename + "\n"); err != nil {
+		return err
+	}
+	
+	return nil
+}
+
 func publishFile(filePath, sk, pk, message string) error {
 	content, err := ioutil.ReadFile(filePath)
 	if err != nil {
@@ -110,6 +171,12 @@ func publishFile(filePath, sk, pk, message string) error {
 		relay.Close()
 		log.Printf("Published to %s", r)
 	}
+
+	// After successful publish, track the file
+	if err := trackFile(filePath); err != nil {
+		log.Printf("Warning: Failed to track file locally: %v", err)
+	}
+	
 	return nil
 }
 
@@ -205,6 +272,8 @@ func main() {
 		args := os.Args[2:]
 		var refs []string
 		var message string
+		
+		// Parse arguments
 		for i := 0; i < len(args); i++ {
 			if args[i] == "-m" && i+1 < len(args) {
 				message = args[i+1]
@@ -213,19 +282,28 @@ func main() {
 				refs = append(refs, args[i])
 			}
 		}
-
+		
+		// If no refs provided, use tracked files
 		if len(refs) == 0 {
-			fmt.Println("No references specified.")
-			return
+			tracked, err := getTrackedFiles()
+			if err != nil {
+				log.Fatal("Failed to get tracked files:", err)
+			}
+			if len(tracked) == 0 {
+				fmt.Println("No files tracked and no references specified.")
+				return
+			}
+			refs = tracked
+			fmt.Printf("Using tracked files: %v\n", refs)
 		}
-
+		
 		fmt.Printf("Creating confluence with %d references and message: %s\n", len(refs), message)
-
+		
 		sk, pk, err := loadNostrSecretKey()
 		if err != nil {
 			log.Fatal(err)
 		}
-
+		
 		err = publishConfluence(refs, sk, pk, message)
 		if err != nil {
 			log.Fatal(err)
