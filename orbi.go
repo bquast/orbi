@@ -16,13 +16,13 @@ import (
 )
 
 const (
-	nostrSecretPathEnvVar = "NOSTR_SECRET_PATH"
-	defaultNostrSecretDir = "~/.nostr"
+	nostrSecretPathEnvVar  = "NOSTR_SECRET_PATH"
+	defaultNostrSecretDir  = "~/.nostr"
 	defaultNostrSecretFile = "secret"
-	eventKindFile         = 4444
-	defaultRelayTimeout   = 10 * time.Second
-	localOrbiDirName      = ".orbi"
-	trackedFilesFileName  = "tracked_files"
+	eventKindFile          = 4444
+	defaultRelayTimeout    = 10 * time.Second
+	localOrbiDirName       = ".orbi"
+	trackedFilesFileName   = "tracked_files"
 )
 
 var defaultRelays = []string{
@@ -167,7 +167,7 @@ func publishFile(filePath, sk, pk, message string) error {
 		log.Printf("Warning: Failed to track file locally: %v", err)
 	}
 
-	fmt.Printf("\nSuccessfully published file %s\n", filepath.Base(filePath))
+	fmt.Printf("\nSuccessfully published file %s\nEvent ID: %s\n", filepath.Base(filePath), ev.ID)
 	return nil
 }
 
